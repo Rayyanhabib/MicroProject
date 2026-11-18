@@ -1,4 +1,5 @@
-import joblib
+import json
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -10,7 +11,21 @@ st.set_page_config(page_title="Housing Market Lab", page_icon="🏠", layout="wi
 
 @st.cache_resource
 def load():
-    return joblib.load("tool_models.joblib")
+    with open("tool_models.json") as f:
+        a = json.load(f)
+    a["town_table"] = pd.DataFrame(a["town_table"])
+    a["tract_table"] = pd.DataFrame(a["tract_table"])
+    a["booster"] = lgb.Booster(model_str=a["gbm_model"])
+    return a
+
+
+def lin_pred(m, vals, town):
+    return m["intercept"] + sum(c * vals[n] for n, c in zip(m["num"], m["coef"])) + m["town_coef"].get(town, 0.0)
+
+
+def logit_pred(m, vals, town):
+    z = m["intercept"] + sum(c * (vals[n] - mu) / sd for n, c, mu, sd in zip(m["num"], m["coef"], m["mean"], m["scale"]))
+    return 1 / (1 + np.exp(-(z + m["town_coef"].get(town, 0.0))))
 
 
 A = load()
@@ -37,7 +52,7 @@ fb = sb.number_input("Full bathrooms", 1, 8, 2)
 hb = sb.number_input("Half bathrooms", 0, 4, 0)
 age = sb.number_input("Age (years)", 1, 170, d["age"])
 tw = T.loc[town]
-year_cols = [c for c in T.columns if isinstance(c, (int, np.integer))]
+year_cols = [c for c in T.columns if str(c).startswith("y20")]
 
 row = pd.DataFrame([{
     "building_square_feet": float(sqft), "land_square_feet": float(land), "bedrooms": float(beds),
@@ -48,12 +63,12 @@ row = pd.DataFrame([{
     "pct_bachelors": tw.bachelors, "walk_score": tw.walk, "transit_min": tw.transit,
     "o_hare_noise": 0.0, "floodplain": 0.0, "road_proximity": 0.0,
     "sim_median_hh_income": tw.income, "sim_crime_per_1000": tw.crime, "town": str(town)}])
-X1 = row[A["CHAR"] + A["EXO"] + ["town"]]
-log1 = float(A["model1"].predict(X1)[0]); P0 = float(np.exp(log1))
+vals = row.iloc[0].to_dict()
+log1 = float(lin_pred(A["m1"], vals, str(town))); P0 = float(np.exp(log1))
 lo, hi = float(np.exp(log1 + A["resid_lo"])), float(np.exp(log1 + A["resid_hi"]))
 gx = row[A["gcols"]].copy(); gx["town"] = pd.Categorical(gx["town"], categories=A["towns"])
-Pg = float(np.exp(A["gbm"].predict(gx)[0]))
-p_above = float(A["model2"].predict_proba(X1)[0, 1])
+Pg = float(np.exp(A["booster"].predict(gx)[0]))
+p_above = float(logit_pred(A["m2"], vals, str(town)))
 sb.divider(); sb.metric("Predicted price (endogenous)", money(P0))
 
 # ---------------- micro-model objects (professor's framework) ----------------
